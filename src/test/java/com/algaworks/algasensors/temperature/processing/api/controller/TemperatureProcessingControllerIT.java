@@ -63,5 +63,15 @@ class TemperatureProcessingControllerIT {
                     .exchange()
                     .expectStatus().isEqualTo(415);
         }
+
+        @Test
+        @DisplayName("should return 400 when the sensor id in the path is not a valid TSID")
+        void shouldRejectInvalidSensorId() {
+            client.post().uri(DATA_PATH, "not-a-valid-tsid")
+                    .contentType(MediaType.TEXT_PLAIN)
+                    .body("25.5")
+                    .exchange()
+                    .expectStatus().isBadRequest();
+        }
     }
 }
