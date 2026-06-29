@@ -1,5 +1,6 @@
 package com.algaworks.algasensors.temperature.processing.api.controller;
 
+import com.algaworks.algasensors.temperature.processing.api.model.TemperatureLogOutput;
 import io.hypersistence.tsid.TSID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -7,10 +8,24 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessagePostProcessor;
+import org.springframework.amqp.core.MessageProperties;
+import org.springframework.amqp.rabbit.core.RabbitAdmin;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.MediaType;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.client.RestTestClient;
+
+import org.mockito.ArgumentCaptor;
+
+import static com.algaworks.algasensors.temperature.processing.infrastructure.rabbitmq.RabbitMQConfig.FANOUT_EXCHANGE_NAME;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class TemperatureProcessingControllerIT {
@@ -19,6 +34,13 @@ class TemperatureProcessingControllerIT {
 
     @LocalServerPort
     private int port;
+
+    // No broker in tests: mock the AMQP beans. RabbitTemplate is also used to assert the publish.
+    @MockitoBean
+    private RabbitTemplate rabbitTemplate;
+
+    @MockitoBean
+    private RabbitAdmin rabbitAdmin;
 
     private RestTestClient client;
 
@@ -43,6 +65,36 @@ class TemperatureProcessingControllerIT {
                     .expectBody().isEmpty();
         }
 
+        @Test
+        @DisplayName("should publish the reading to the fanout exchange with the sensorId header")
+        void shouldPublishTemperatureReading() {
+            TSID sensorId = TSID.fast();
+
+            client.post().uri(DATA_PATH, sensorId.toString())
+                    .contentType(MediaType.TEXT_PLAIN)
+                    .body("25.5")
+                    .exchange()
+                    .expectStatus().isOk();
+
+            ArgumentCaptor<Object> payloadCaptor = ArgumentCaptor.forClass(Object.class);
+            ArgumentCaptor<MessagePostProcessor> mppCaptor = ArgumentCaptor.forClass(MessagePostProcessor.class);
+            verify(rabbitTemplate).convertAndSend(
+                    eq(FANOUT_EXCHANGE_NAME), eq(""), payloadCaptor.capture(), mppCaptor.capture());
+
+            assertThat(payloadCaptor.getValue()).isInstanceOf(TemperatureLogOutput.class);
+            TemperatureLogOutput payload = (TemperatureLogOutput) payloadCaptor.getValue();
+            assertThat(payload.getSensorId()).isEqualTo(sensorId);
+            assertThat(payload.getValue()).isEqualTo(25.5);
+            assertThat(payload.getId()).isNotNull();
+            assertThat(payload.getRegisteredAt()).isNotNull();
+
+            // The MessagePostProcessor must stamp the sensorId header onto the outgoing message.
+            Message processed = mppCaptor.getValue()
+                    .postProcessMessage(new Message(new byte[0], new MessageProperties()));
+            assertThat((String) processed.getMessageProperties().getHeader("sensorId"))
+                    .isEqualTo(sensorId.toString());
+        }
+
         @ParameterizedTest(name = "value=[{0}] -> 400")
         @DisplayName("should return 400 when the body is blank or not a number")
         @ValueSource(strings = {"abc", "12,5", "1.2.3", "twelve", "   ", ""})
@@ -52,6 +104,8 @@ class TemperatureProcessingControllerIT {
                     .body(body)
                     .exchange()
                     .expectStatus().isBadRequest();
+
+            verifyNoInteractions(rabbitTemplate);
         }
 
         @Test
@@ -62,6 +116,8 @@ class TemperatureProcessingControllerIT {
                     .body("25.5")
                     .exchange()
                     .expectStatus().isEqualTo(415);
+
+            verifyNoInteractions(rabbitTemplate);
         }
 
         @Test
@@ -72,6 +128,8 @@ class TemperatureProcessingControllerIT {
                     .body("25.5")
                     .exchange()
                     .expectStatus().isBadRequest();
+
+            verifyNoInteractions(rabbitTemplate);
         }
     }
 }
